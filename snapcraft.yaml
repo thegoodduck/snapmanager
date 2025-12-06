@@ -1,0 +1,24 @@
+name: snapmanager-proto
+base: core22
+version: '0.1'
+summary: SnapManager prototype - manage snaps and apt packages
+description: |
+  Prototype GTK4 app to browse snaps and apt packages and perform management actions.
+
+grade: devel
+confinement: devmode
+
+apps:
+  snapmanager:
+    command: bin/snapmanager
+    plugs: [desktop, desktop-legacy, network, home]
+
+parts:
+  snapmanager:
+    plugin: dump
+    source: .
+    organize:
+      main.py: bin/snapmanager
+    build-packages:
+      - python3-gi
+      - gir1.2-gtk-4.0
