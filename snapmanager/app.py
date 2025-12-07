@@ -59,7 +59,16 @@ class SnapManagerApp(Gtk.Application):
         )
         snap_controls.append(btn_unhold_all)
 
+        btn_hold_status = Gtk.Button(label="Show hold status")
+        btn_hold_status.connect("clicked", lambda w: self.show_snap_refresh_status())
+        snap_controls.append(btn_hold_status)
+
         left_box.append(snap_controls)
+
+        snap_search = Gtk.Entry()
+        snap_search.set_placeholder_text("Search snaps")
+        snap_search.connect("changed", lambda w: self.set_snap_filter(w.get_text()))
+        left_box.append(snap_search)
 
         self.snap_list = Gtk.ListBox()
         snap_scroll = Gtk.ScrolledWindow()
@@ -83,6 +92,11 @@ class SnapManagerApp(Gtk.Application):
         apt_label.set_xalign(0)
         right_box.append(apt_label)
 
+        apt_search = Gtk.Entry()
+        apt_search.set_placeholder_text("Search apt packages")
+        apt_search.connect("changed", lambda w: self.set_apt_filter(w.get_text()))
+        right_box.append(apt_search)
+
         self.apt_list = Gtk.ListBox()
         apt_scroll = Gtk.ScrolledWindow()
         apt_scroll.set_child(self.apt_list)
@@ -99,6 +113,10 @@ class SnapManagerApp(Gtk.Application):
         paned.set_end_child(right_box)
 
         self.window.set_child(paned)
+        self.snap_items = []
+        self.apt_items = []
+        self.snap_filter = ""
+        self.apt_filter = ""
         self.populate_snaps()
         self.populate_apt()
         self.window.show()
@@ -125,7 +143,7 @@ class SnapManagerApp(Gtk.Application):
     def populate_snaps(self):
         self.clear_listbox(self.snap_list)
 
-        code, out, err = self.run_command("snap list --all")
+        code, out, err = self.run_command("snap list")
         if code != 0:
             row = Gtk.Label(label=f"Error listing snaps: {err or out}")
             self.snap_list.append(row)
@@ -135,14 +153,33 @@ class SnapManagerApp(Gtk.Application):
         if len(lines) <= 1:
             return
 
+        self.snap_items = []
+        seen = set()
         # header line at 0
         for ln in lines[1:]:
             parts = [p for p in ln.split() if p]
             if not parts:
                 continue
             name = parts[0]
+            if name in seen:
+                continue
+            seen.add(name)
             version = parts[1] if len(parts) > 1 else ""
             publisher = parts[2] if len(parts) > 2 else ""
+            self.snap_items.append(
+                {"name": name, "version": version, "publisher": publisher}
+            )
+        self.render_snaps()
+
+    def render_snaps(self):
+        self.clear_listbox(self.snap_list)
+        items = [
+            i for i in self.snap_items if self.snap_filter.lower() in i["name"].lower()
+        ]
+        for item in items:
+            name = item["name"]
+            version = item["version"]
+            publisher = item["publisher"]
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             label = Gtk.Label(label=f"{name} — {version} — {publisher}")
             label.set_xalign(0)
@@ -199,11 +236,23 @@ class SnapManagerApp(Gtk.Application):
             return
 
         lines = out.strip().splitlines()
+        seen = set()
+        self.apt_items = []
         # first line may be 'Listing...'
         for ln in lines:
             if "/" not in ln:
                 continue
             pkg = ln.split("/")[0]
+            if pkg in seen:
+                continue
+            seen.add(pkg)
+            self.apt_items.append(pkg)
+        self.render_apt()
+
+    def render_apt(self):
+        self.clear_listbox(self.apt_list)
+        items = [p for p in self.apt_items if self.apt_filter.lower() in p.lower()]
+        for pkg in items:
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             label = Gtk.Label(label=pkg)
             label.set_xalign(0)
@@ -222,6 +271,19 @@ class SnapManagerApp(Gtk.Application):
             hbox.append(btn_unhold)
 
             self.apt_list.append(hbox)
+
+    def set_snap_filter(self, text: str):
+        self.snap_filter = text or ""
+        self.render_snaps()
+
+    def set_apt_filter(self, text: str):
+        self.apt_filter = text or ""
+        self.render_apt()
+
+    def show_snap_refresh_status(self):
+        code, out, err = self.run_command("snap refresh --time")
+        txt = out or err or f"return code {code}"
+        self.show_info("Snap refresh status", code, txt, "")
 
     def confirm_and_run_apt_mark(self, pkg, hold=True):
         action = "hold" if hold else "unhold"
@@ -328,35 +390,53 @@ class SnapManagerApp(Gtk.Application):
     def _apply_css(self):
         css = b"""
         window {
-            background: #f5f5f5;
-            color: #111;
+            background: #1c1c1c;
+            color: #e6e6e6;
         }
         headerbar {
-            background: #ededed;
-            color: #111;
+            background: #242424;
+            color: #e6e6e6;
         }
         scrolledwindow {
-            background: #ffffff;
+            background: #1e1e1e;
+            border: 1px solid #2c2c2c;
         }
         listbox row {
-            background: #ffffff;
-            color: #111;
-            padding: 4px;
+            background: #1e1e1e;
+            color: #e6e6e6;
+            padding: 6px;
+        }
+        listbox row:selected {
+            background: #c75000;
+            color: #ffffff;
         }
         button {
-            background: #3b4252;
-            color: #f4f6fb;
+            background: #2f2f2f;
+            color: #f4f4f4;
             border-radius: 6px;
-            padding: 4px 10px;
+            padding: 4px 12px;
+            border: 1px solid #3a3a3a;
         }
         button:hover {
-            background: #4c566a;
+            background: #3a3a3a;
         }
         button:active {
-            background: #2e3440;
+            background: #c75000;
+            color: #ffffff;
+            border-color: #c75000;
         }
         label {
-            color: #111;
+            color: #e6e6e6;
+        }
+        entry {
+            background: #2a2a2a;
+            color: #e6e6e6;
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        separator {
+            background: #2c2c2c;
         }
         """
         provider = Gtk.CssProvider()
