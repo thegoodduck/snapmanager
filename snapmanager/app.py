@@ -8,6 +8,8 @@ import threading
 import subprocess
 import shlex
 import sys
+import os
+import glob
 
 
 class SnapManagerApp(Gtk.Application):
@@ -117,6 +119,7 @@ class SnapManagerApp(Gtk.Application):
         self.apt_items = []
         self.snap_filter = ""
         self.apt_filter = ""
+        self.snap_hold_status = {}
         self.populate_snaps()
         self.populate_apt()
         self.window.show()
@@ -169,7 +172,9 @@ class SnapManagerApp(Gtk.Application):
             self.snap_items.append(
                 {"name": name, "version": version, "publisher": publisher}
             )
+        self.snap_hold_status = {item["name"]: "…" for item in self.snap_items}
         self.render_snaps()
+        threading.Thread(target=self._load_snap_holds, daemon=True).start()
 
     def render_snaps(self):
         self.clear_listbox(self.snap_list)
@@ -181,9 +186,20 @@ class SnapManagerApp(Gtk.Application):
             version = item["version"]
             publisher = item["publisher"]
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            icon = self._icon_for_snap(name)
+            row_box.append(icon)
+
             label = Gtk.Label(label=f"{name} — {version} — {publisher}")
             label.set_xalign(0)
-            hbox.append(label)
+            row_box.append(label)
+
+            hold_lbl = Gtk.Label(label=f"Hold: {self.snap_hold_status.get(name, '…')}")
+            hold_lbl.set_xalign(0)
+            row_box.append(hold_lbl)
+
+            hbox.append(row_box)
 
             btn_hold_snap = Gtk.Button(label="Hold updates")
             btn_hold_snap.connect(
@@ -254,6 +270,9 @@ class SnapManagerApp(Gtk.Application):
         items = [p for p in self.apt_items if self.apt_filter.lower() in p.lower()]
         for pkg in items:
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            icon = self._icon_for_package(pkg)
+            hbox.append(icon)
+
             label = Gtk.Label(label=pkg)
             label.set_xalign(0)
             hbox.append(label)
@@ -379,6 +398,49 @@ class SnapManagerApp(Gtk.Application):
             text=f"{title}: {typ}\n\n{txt}",
         )
         self._run_dialog_blocking(dlg)
+
+    def _icon_for_snap(self, name: str) -> Gtk.Image:
+        # 1) Snap desktop file (store-provided icon)
+        desk = self._find_desktop_file(name, ["/var/lib/snapd/desktop/applications"])
+        if desk:
+            img = self._image_from_desktop(desk)
+            if img:
+                return img
+
+        # 2) Common snap icon paths
+        icon_paths = [
+            f"/var/lib/snapd/desktop/icons/{name}.png",
+            f"/var/lib/snapd/desktop/icons/{name}.svg",
+            f"/snap/{name}/current/meta/gui/icon.png",
+            f"/snap/{name}/current/meta/gui/icon.svg",
+        ]
+        for p in icon_paths:
+            if os.path.exists(p):
+                img = Gtk.Image.new_from_file(p)
+                if img.get_paintable():
+                    return img
+
+        # 3) Theme lookups with common icon names
+        for icon_name in [name, f"{name}-symbolic", f"{name}.icon", f"snap.{name}"]:
+            img = self._image_from_icon_name(icon_name)
+            if img:
+                return img
+
+        # 4) Fallback
+        return Gtk.Image.new_from_icon_name("application-x-executable")
+
+    def _icon_for_package(self, name: str) -> Gtk.Image:
+        desk = self._find_desktop_file(
+            name, ["/usr/share/applications", "/var/lib/snapd/desktop/applications"]
+        )
+        if desk:
+            img = self._image_from_desktop(desk)
+            if img:
+                return img
+        img = self._image_from_icon_name(name)
+        if img:
+            return img
+        return Gtk.Image.new_from_icon_name("application-x-executable")
 
     def clear_listbox(self, listbox: Gtk.ListBox):
         child = listbox.get_first_child()
@@ -530,6 +592,68 @@ class SnapManagerApp(Gtk.Application):
         btn_close.set_sensitive(True)
         dialog.set_title(f"{dialog.get_title()} — done (rc={rc})")
         return False
+
+    def _find_desktop_file(self, name: str, paths):
+        candidates = [name, f"{name}.desktop", f"{name}.desktop.desktop"]
+        for base in paths:
+            for cand in candidates:
+                p = os.path.join(
+                    base, cand if cand.endswith(".desktop") else f"{cand}.desktop"
+                )
+                if os.path.exists(p):
+                    return p
+            # glob for prefix matches
+            matches = glob.glob(os.path.join(base, f"{name}*.desktop"))
+            if matches:
+                return matches[0]
+        return None
+
+    def _image_from_desktop(self, desktop_path: str):
+        try:
+            appinfo = Gio.DesktopAppInfo.new_from_filename(desktop_path)
+            if not appinfo:
+                return None
+            icon = appinfo.get_icon()
+            if icon:
+                img = Gtk.Image.new_from_gicon(icon)
+                if img.get_paintable():
+                    return img
+            icon_name = appinfo.get_string("Icon") if appinfo.has_key("Icon") else None
+            if icon_name:
+                img = self._image_from_icon_name(icon_name)
+                if img:
+                    return img
+            return None
+        except Exception:
+            return None
+
+    def _image_from_icon_name(self, icon_name: str):
+        if not icon_name:
+            return None
+        # Simplify: rely on icon name lookup and theme resolution via Gtk.Image
+        img = Gtk.Image.new_from_icon_name(icon_name)
+        if img.get_paintable():
+            return img
+        return None
+
+    def _load_snap_holds(self):
+        for item in list(self.snap_items):
+            name = item["name"]
+            code, out, err = self.run_command(
+                f"snap refresh --time {shlex.quote(name)}"
+            )
+            status = self._parse_snap_hold(out or err or "", code)
+            self.snap_hold_status[name] = status
+            GLib.idle_add(self.render_snaps)
+
+    def _parse_snap_hold(self, text: str, code: int) -> str:
+        if code != 0:
+            return "unknown"
+        for line in text.splitlines():
+            lower = line.lower()
+            if "hold" in lower:
+                return line.strip()
+        return "none"
 
 
 def shutil_which(cmd):
