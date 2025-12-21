@@ -1,18 +1,34 @@
 import gi
 
 gi.require_version("Gtk", "4.0")
-gi.require_version("Gio", "2.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gio, Gtk, GLib, Gdk
+from gi.repository import Gtk, GLib, Gdk
 import threading
 import subprocess
 import shlex
-import sys
 import os
-import glob
 
 
 class SnapManagerApp(Gtk.Application):
+    def _image_from_desktop(self, desktop_file_path):
+        # Try to extract the Icon entry from the .desktop file
+        if not desktop_file_path or not os.path.exists(desktop_file_path):
+            return None
+        icon_name = None
+        try:
+            with open(desktop_file_path, "r") as f:
+                for line in f:
+                    if line.strip().startswith("Icon="):
+                        icon_name = line.strip().split("=", 1)[1]
+                        break
+        except Exception:
+            return None
+        if icon_name:
+            img = self._image_from_icon_name(icon_name)
+            if img:
+                return img
+        return None
+
     def __init__(self):
         super().__init__(application_id="com.example.SnapManager")
         self.connect("activate", self.on_activate)
@@ -181,6 +197,7 @@ class SnapManagerApp(Gtk.Application):
         items = [
             i for i in self.snap_items if self.snap_filter.lower() in i["name"].lower()
         ]
+
         for item in items:
             name = item["name"]
             version = item["version"]
@@ -198,6 +215,13 @@ class SnapManagerApp(Gtk.Application):
             hold_lbl = Gtk.Label(label=f"Hold: {self.snap_hold_status.get(name, '…')}")
             hold_lbl.set_xalign(0)
             row_box.append(hold_lbl)
+
+            # Add Snap Problem Solver button
+            btn_solver = Gtk.Button(label="Snap Problem Solver")
+            btn_solver.connect(
+                "clicked", lambda w, n=name: self.show_snap_problem_solver(n)
+            )
+            row_box.append(btn_solver)
 
             hbox.append(row_box)
 
@@ -242,6 +266,115 @@ class SnapManagerApp(Gtk.Application):
 
             self.snap_list.append(hbox)
 
+    def show_snap_problem_solver(self, snap_name: str):
+        # Solutions for snap sandbox issues
+        solutions = [
+            {
+                "title": "Use Classic Confinement",
+                "desc": "Run the app with fewer restrictions if the snap supports it.",
+                "pros": "Fewer sandbox issues, more access to your system.",
+                "cons": "Not all snaps support this. Slightly less secure.",
+                "risk": "Medium",
+                "cmd": f"sudo snap install {snap_name} --classic",
+            },
+            {
+                "title": "Switch to Devmode (Developer Mode)",
+                "desc": "Run the app with almost no restrictions. Only for testing or troubleshooting.",
+                "pros": "Removes most sandbox problems.",
+                "cons": "Unsafe: exposes your system to risks. Not for daily use.",
+                "risk": "High",
+                "cmd": f"sudo snap remove {snap_name}\nsudo snap install {snap_name} --devmode",
+            },
+            {
+                "title": "Connect Missing Permissions",
+                "desc": "Allow the app to access files, devices, or features it needs.",
+                "pros": "Fixes most permission errors. Safe if you trust the app.",
+                "cons": "You may need to know which permission is missing.",
+                "risk": "Low to Medium",
+                "cmd": f"sudo snap connections {snap_name}\n# To connect an interface:\nsudo snap connect {snap_name}:<interface>",
+            },
+            {
+                "title": "Install a Non-Snap Version",
+                "desc": "Use the same app from APT, Flatpak, or AppImage instead of Snap.",
+                "pros": "No Snap sandbox. May work better with your system.",
+                "cons": "Not always available. May be an older version.",
+                "risk": "Low",
+                "cmd": f"sudo apt install {snap_name}\n# or search for Flatpak/AppImage alternatives",
+            },
+            {
+                "title": "Remove Snap Completely (Advanced)",
+                "desc": "Uninstall Snap and all snaps from your system.",
+                "pros": "No more Snap issues.",
+                "cons": "Advanced: removes all snaps. Some apps may stop working.",
+                "risk": "High",
+                "cmd": "sudo apt purge snapd",
+            },
+        ]
+
+        # Build dialog content
+        dialog = Gtk.Dialog(
+            title=f"Snap Problem Solver: {snap_name}",
+            transient_for=self.window,
+            modal=True,
+        )
+        dialog.set_default_size(600, 500)
+        box = dialog.get_content_area()
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        vbox.set_margin_top(12)
+        vbox.set_margin_bottom(12)
+        vbox.set_margin_start(12)
+        vbox.set_margin_end(12)
+        box.append(vbox)
+
+        intro = Gtk.Label(
+            label="If this app fails to start or work due to Snap sandbox restrictions, try one of these solutions:"
+        )
+        intro.set_wrap(True)
+        intro.set_xalign(0)
+        vbox.append(intro)
+
+        for sol in solutions:
+            frame = Gtk.Frame(label=sol["title"])
+            frame.set_margin_top(6)
+            frame.set_margin_bottom(6)
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            inner.set_margin_top(4)
+            inner.set_margin_bottom(4)
+            inner.set_margin_start(8)
+            inner.set_margin_end(8)
+            # Explanation
+            lbl = Gtk.Label(label=sol["desc"])
+            lbl.set_wrap(True)
+            lbl.set_xalign(0)
+            inner.append(lbl)
+            # Pros/cons
+            pros = Gtk.Label(label=f"Pros: {sol['pros']}")
+            pros.set_wrap(True)
+            pros.set_xalign(0)
+            inner.append(pros)
+            cons = Gtk.Label(label=f"Cons: {sol['cons']}")
+            cons.set_wrap(True)
+            cons.set_xalign(0)
+            inner.append(cons)
+            # Risk
+            risk = Gtk.Label(label=f"Risk level: {sol['risk']}")
+            risk.set_wrap(True)
+            risk.set_xalign(0)
+            inner.append(risk)
+            # Command
+            cmdlbl = Gtk.Label(label=f"Command(s):\n{sol['cmd']}")
+            cmdlbl.set_wrap(True)
+            cmdlbl.set_xalign(0)
+            cmdlbl.get_style_context().add_class("monospace")
+            inner.append(cmdlbl)
+            frame.set_child(inner)
+            vbox.append(frame)
+
+        btn_close = Gtk.Button(label="Close")
+        btn_close.connect("clicked", lambda b: dialog.destroy())
+        vbox.append(btn_close)
+        dialog.show()
+
     def populate_apt(self):
         self.clear_listbox(self.apt_list)
 
@@ -270,24 +403,33 @@ class SnapManagerApp(Gtk.Application):
         items = [p for p in self.apt_items if self.apt_filter.lower() in p.lower()]
         for pkg in items:
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             icon = self._icon_for_package(pkg)
-            hbox.append(icon)
+            row_box.append(icon)
 
             label = Gtk.Label(label=pkg)
             label.set_xalign(0)
-            hbox.append(label)
+            row_box.append(label)
 
-            btn_hold = Gtk.Button(label="Hold")
-            btn_hold.connect(
-                "clicked", lambda w, p=pkg: self.confirm_and_run_apt_mark(p, hold=True)
-            )
-            hbox.append(btn_hold)
+            hbox.append(row_box)
 
-            btn_unhold = Gtk.Button(label="Unhold")
-            btn_unhold.connect(
-                "clicked", lambda w, p=pkg: self.confirm_and_run_apt_mark(p, hold=False)
+            btn_hold_snap = Gtk.Button(label="Hold updates")
+            btn_hold_snap.connect(
+                "clicked",
+                lambda w, n=pkg: self.confirm_and_run_snap_hold(
+                    n, hold=True, duration=None
+                ),
             )
-            hbox.append(btn_unhold)
+            hbox.append(btn_hold_snap)
+
+            btn_hold_snap_24 = Gtk.Button(label="Hold 24h")
+            btn_hold_snap_24.connect(
+                "clicked",
+                lambda w, n=pkg: self.confirm_and_run_snap_hold(
+                    n, hold=True, duration="24h"
+                ),
+            )
+            hbox.append(btn_hold_snap_24)
 
             self.apt_list.append(hbox)
 
@@ -369,7 +511,6 @@ class SnapManagerApp(Gtk.Application):
             cmd = f"{cmd} {shlex.quote(snap_name)}"
 
         action = "hold updates" if hold else "unhold updates"
-        timing = f" for {duration}" if duration else ""
         dlg = Gtk.MessageDialog(
             transient_for=self.window,
             modal=True,
@@ -595,37 +736,12 @@ class SnapManagerApp(Gtk.Application):
 
     def _find_desktop_file(self, name: str, paths):
         candidates = [name, f"{name}.desktop", f"{name}.desktop.desktop"]
-        for base in paths:
-            for cand in candidates:
-                p = os.path.join(
-                    base, cand if cand.endswith(".desktop") else f"{cand}.desktop"
-                )
-                if os.path.exists(p):
-                    return p
-            # glob for prefix matches
-            matches = glob.glob(os.path.join(base, f"{name}*.desktop"))
-            if matches:
-                return matches[0]
+        for path in paths:
+            for candidate in candidates:
+                full_path = os.path.join(path, candidate)
+                if os.path.exists(full_path):
+                    return full_path
         return None
-
-    def _image_from_desktop(self, desktop_path: str):
-        try:
-            appinfo = Gio.DesktopAppInfo.new_from_filename(desktop_path)
-            if not appinfo:
-                return None
-            icon = appinfo.get_icon()
-            if icon:
-                img = Gtk.Image.new_from_gicon(icon)
-                if img.get_paintable():
-                    return img
-            icon_name = appinfo.get_string("Icon") if appinfo.has_key("Icon") else None
-            if icon_name:
-                img = self._image_from_icon_name(icon_name)
-                if img:
-                    return img
-            return None
-        except Exception:
-            return None
 
     def _image_from_icon_name(self, icon_name: str):
         if not icon_name:
