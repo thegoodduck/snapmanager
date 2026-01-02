@@ -40,7 +40,30 @@ class SnapManagerApp(Gtk.Application):
         self._apply_css()
 
         header = Gtk.HeaderBar.new()
-        header.set_title_widget(Gtk.Label(label="SnapManager — Prototype"))
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        title_label = Gtk.Label(label="SnapManager — Prototype")
+        title_label.set_xalign(0)
+        title_box.append(title_label)
+
+        menu_btn = Gtk.MenuButton()
+        menu_btn.set_icon_name("open-menu-symbolic")
+        popover = Gtk.Popover()
+        pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        pop_box.set_margin_top(6)
+        pop_box.set_margin_bottom(6)
+        pop_box.set_margin_start(6)
+        pop_box.set_margin_end(6)
+        btn_help = Gtk.Button(label="Help / Usage Tips")
+        btn_help.connect("clicked", lambda w: self.show_help_dialog())
+        pop_box.append(btn_help)
+        btn_about = Gtk.Button(label="About SnapManager")
+        btn_about.connect("clicked", lambda w: self.show_about_dialog())
+        pop_box.append(btn_about)
+        popover.set_child(pop_box)
+        menu_btn.set_popover(popover)
+        title_box.append(menu_btn)
+
+        header.set_title_widget(title_box)
         self.window.set_titlebar(header)
 
         paned = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
@@ -170,6 +193,7 @@ class SnapManagerApp(Gtk.Application):
 
         lines = out.strip().splitlines()
         if len(lines) <= 1:
+            self.snap_list.append(Gtk.Label(label="No snaps found."))
             return
 
         self.snap_items = []
@@ -197,6 +221,11 @@ class SnapManagerApp(Gtk.Application):
         items = [
             i for i in self.snap_items if self.snap_filter.lower() in i["name"].lower()
         ]
+
+        if not items:
+            msg = "No snaps match your search." if self.snap_filter else "No snaps available."
+            self.snap_list.append(Gtk.Label(label=msg))
+            return
 
         for item in items:
             name = item["name"]
@@ -601,11 +630,18 @@ class SnapManagerApp(Gtk.Application):
                 continue
             seen.add(pkg)
             self.apt_items.append(pkg)
+        if not self.apt_items:
+            self.apt_list.append(Gtk.Label(label="No apt packages found."))
+            return
         self.render_apt()
 
     def render_apt(self):
         self.clear_listbox(self.apt_list)
         items = [p for p in self.apt_items if self.apt_filter.lower() in p.lower()]
+        if not items:
+            msg = "No apt packages match your search." if self.apt_filter else "No apt packages available."
+            self.apt_list.append(Gtk.Label(label=msg))
+            return
         for pkg in items:
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -784,6 +820,39 @@ class SnapManagerApp(Gtk.Application):
         )
         self._run_dialog_blocking(dlg)
 
+    def show_help_dialog(self):
+        tips = (
+            "How to use SnapManager:\n"
+            "• Snap actions: hold/unhold updates, run unsandboxed (devmode), switch to apt.\n"
+            "• Apt actions: show details, remove, reinstall.\n"
+            "• Snap Problem Solver: pick the issue, read the recommended fix, and click Apply.\n"
+            "Safety: risky actions (devmode/unsandboxed) prompt before running."
+        )
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Help / Usage Tips",
+        )
+        dlg.set_property("secondary-text", tips)
+        self._run_dialog_blocking(dlg)
+
+    def show_about_dialog(self):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="SnapManager Prototype",
+        )
+        dlg.set_property(
+            "secondary-text",
+            "A GTK4 helper for managing snaps and apt packages on Ubuntu.\n"
+            "Shows safe commands, prompts before risky actions, and provides quick fixes for common snap issues.",
+        )
+        self._run_dialog_blocking(dlg)
+
     def _icon_for_snap(self, name: str) -> Gtk.Image:
         # 1) Try to find a desktop file in common Ubuntu locations
         desktop_paths = [
@@ -854,7 +923,13 @@ class SnapManagerApp(Gtk.Application):
             color: #e6e6e6;
         }
         """
-        # ...existing code for applying CSS...
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css)
+        display = Gdk.Display.get_default()
+        if display:
+            Gtk.StyleContext.add_provider_for_display(
+                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
 
     def _set_dialog_secondary(self, dialog: Gtk.MessageDialog, text: str):
         # Deprecated helper kept for compatibility; not used after inlined text approach.
