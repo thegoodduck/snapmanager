@@ -807,7 +807,6 @@ class SnapManagerApp(Gtk.Application):
         resp = self._run_dialog_blocking(dlg)
         if resp == Gtk.ResponseType.OK:
             self.run_long_command(f"snap refresh {flag} {target}", cmd)
-
     def show_info(self, title, code, out, err):
         typ = "Success" if code == 0 else "Error"
         txt = out.strip() or err.strip() or f"return code {code}"
