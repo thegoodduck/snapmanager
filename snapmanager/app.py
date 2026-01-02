@@ -267,58 +267,15 @@ class SnapManagerApp(Gtk.Application):
             self.snap_list.append(hbox)
 
     def show_snap_problem_solver(self, snap_name: str):
-        # Solutions for snap sandbox issues
-        solutions = [
-            {
-                "title": "Use Classic Confinement",
-                "desc": "Run the app with fewer restrictions if the snap supports it.",
-                "pros": "Fewer sandbox issues, more access to your system.",
-                "cons": "Not all snaps support this. Slightly less secure.",
-                "risk": "Medium",
-                "cmd": f"sudo snap install {snap_name} --classic",
-            },
-            {
-                "title": "Switch to Devmode (Developer Mode)",
-                "desc": "Run the app with almost no restrictions. Only for testing or troubleshooting.",
-                "pros": "Removes most sandbox problems.",
-                "cons": "Unsafe: exposes your system to risks. Not for daily use.",
-                "risk": "High",
-                "cmd": f"sudo snap remove {snap_name}\nsudo snap install {snap_name} --devmode",
-            },
-            {
-                "title": "Connect Missing Permissions",
-                "desc": "Allow the app to access files, devices, or features it needs.",
-                "pros": "Fixes most permission errors. Safe if you trust the app.",
-                "cons": "You may need to know which permission is missing.",
-                "risk": "Low to Medium",
-                "cmd": f"sudo snap connections {snap_name}\n# To connect an interface:\nsudo snap connect {snap_name}:<interface>",
-            },
-            {
-                "title": "Install a Non-Snap Version",
-                "desc": "Use the same app from APT, Flatpak, or AppImage instead of Snap.",
-                "pros": "No Snap sandbox. May work better with your system.",
-                "cons": "Not always available. May be an older version.",
-                "risk": "Low",
-                "cmd": f"sudo apt install {snap_name}\n# or search for Flatpak/AppImage alternatives",
-            },
-            {
-                "title": "Remove Snap Completely (Advanced)",
-                "desc": "Uninstall Snap and all snaps from your system.",
-                "pros": "No more Snap issues.",
-                "cons": "Advanced: removes all snaps. Some apps may stop working.",
-                "risk": "High",
-                "cmd": "sudo apt purge snapd",
-            },
-        ]
-
-        # Build dialog content
+        # Diagnostic dialog - ask what's wrong and run probes
         dialog = Gtk.Dialog(
             title=f"Snap Problem Solver: {snap_name}",
             transient_for=self.window,
             modal=True,
         )
-        dialog.set_default_size(600, 500)
+        dialog.maximize()
         box = dialog.get_content_area()
+        
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         vbox.set_margin_top(12)
         vbox.set_margin_bottom(12)
@@ -327,53 +284,301 @@ class SnapManagerApp(Gtk.Application):
         box.append(vbox)
 
         intro = Gtk.Label(
-            label="If this app fails to start or work due to Snap sandbox restrictions, try one of these solutions:"
+            label=f"Let's diagnose the issue with {snap_name}.\n\nWhat's happening?"
         )
         intro.set_wrap(True)
         intro.set_xalign(0)
         vbox.append(intro)
 
-        for sol in solutions:
-            frame = Gtk.Frame(label=sol["title"])
-            frame.set_margin_top(6)
-            frame.set_margin_bottom(6)
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            inner.set_margin_top(4)
-            inner.set_margin_bottom(4)
-            inner.set_margin_start(8)
-            inner.set_margin_end(8)
-            # Explanation
-            lbl = Gtk.Label(label=sol["desc"])
-            lbl.set_wrap(True)
-            lbl.set_xalign(0)
-            inner.append(lbl)
-            # Pros/cons
-            pros = Gtk.Label(label=f"Pros: {sol['pros']}")
-            pros.set_wrap(True)
-            pros.set_xalign(0)
-            inner.append(pros)
-            cons = Gtk.Label(label=f"Cons: {sol['cons']}")
-            cons.set_wrap(True)
-            cons.set_xalign(0)
-            inner.append(cons)
-            # Risk
-            risk = Gtk.Label(label=f"Risk level: {sol['risk']}")
-            risk.set_wrap(True)
-            risk.set_xalign(0)
-            inner.append(risk)
-            # Command
-            cmdlbl = Gtk.Label(label=f"Command(s):\n{sol['cmd']}")
-            cmdlbl.set_wrap(True)
-            cmdlbl.set_xalign(0)
-            cmdlbl.get_style_context().add_class("monospace")
-            inner.append(cmdlbl)
-            frame.set_child(inner)
-            vbox.append(frame)
+        # Question buttons
+        questions = [
+            ("App won't start", "crash"),
+            ("App starts but can't access files", "files"),
+            ("App can't access network", "network"),
+            ("App can't access microphone/camera", "devices"),
+            ("App works but is slow/buggy", "performance"),
+            ("Other/Unknown issue", "unknown"),
+        ]
+
+        for q_text, q_type in questions:
+            btn = Gtk.Button(label=q_text)
+            btn.connect("clicked", lambda w, t=q_type: self._run_diagnostics(snap_name, t, dialog))
+            vbox.append(btn)
+
+        btn_close = Gtk.Button(label="Cancel")
+        btn_close.connect("clicked", lambda b: dialog.destroy())
+        vbox.append(btn_close)
+        dialog.show()
+
+    def _run_diagnostics(self, snap_name: str, issue_type: str, prev_dialog):
+        prev_dialog.destroy()
+
+        # Run and parse diagnostics for user-friendly summary
+        info_code, info_out, info_err = self.run_command(f"snap info {shlex.quote(snap_name)}")
+        connections_code, connections_out, connections_err = self.run_command(f"snap connections {shlex.quote(snap_name)}")
+        apt_code, apt_out, apt_err = self.run_command(f"apt-cache search {shlex.quote(snap_name)}")
+
+        # Parse classic support
+        supports_classic = ("classic" in info_out.lower()) if info_code == 0 else False
+        # Parse plugs
+        has_file_plug = "home" in connections_out or "removable-media" in connections_out
+        has_network_plug = "network" in connections_out or "network-bind" in connections_out
+        has_audio_plug = any(x in connections_out for x in ["audio-record", "camera", "microphone"])
+        # Parse apt availability
+        apt_available = snap_name.lower() in apt_out.lower() if apt_code == 0 else False
+
+        diagnostics = {
+            "supports_classic": supports_classic,
+            "has_plugs": has_file_plug or has_network_plug or has_audio_plug,
+            "apt_available": apt_available,
+        }
+
+        # Build user-friendly summary
+        summary_lines = []
+        if info_code != 0:
+            summary_lines.append("Could not get snap info.")
+        else:
+            if supports_classic:
+                summary_lines.append("Classic mode is available for this snap (can run with fewer restrictions).")
+            else:
+                summary_lines.append("Classic mode is NOT available for this snap.")
+        if connections_code != 0:
+            summary_lines.append("Could not get snap connections.")
+        else:
+            if has_file_plug:
+                summary_lines.append("Snap has file access plugs (home/removable-media).")
+            else:
+                summary_lines.append("Snap does NOT have file access plugs (may not access your files).")
+            if has_network_plug:
+                summary_lines.append("Snap has network access plugs.")
+            else:
+                summary_lines.append("Snap does NOT have network access plugs.")
+            if has_audio_plug:
+                summary_lines.append("Snap has audio/camera plugs.")
+            else:
+                summary_lines.append("Snap does NOT have audio/camera plugs.")
+        if apt_code != 0:
+            summary_lines.append("Could not check for APT package.")
+        else:
+            if apt_available:
+                summary_lines.append("An APT package with this name is available.")
+            else:
+                summary_lines.append("No APT package with this name found.")
+
+        # Recommend solution based on issue type and diagnostics
+        recommendation = self._recommend_solution(snap_name, issue_type, diagnostics)
+
+        # Severity mapping
+        severity_map = {
+            "crash": ("Critical", "#d32f2f"),
+            "files": ("Warning", "#fbc02d"),
+            "network": ("Warning", "#fbc02d"),
+            "devices": ("Warning", "#fbc02d"),
+            "performance": ("Info", "#1976d2"),
+            "unknown": ("Info", "#1976d2"),
+        }
+        severity, sev_color = severity_map.get(issue_type, ("Info", "#1976d2"))
+
+        dialog = Gtk.Dialog(
+            title=f"Recommended Solution for {snap_name}",
+            transient_for=self.window,
+            modal=True,
+        )
+        dialog.set_default_size(400, 320)
+        box = dialog.get_content_area()
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        box.append(scroll)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        vbox.set_margin_top(6)
+        vbox.set_margin_bottom(6)
+        vbox.set_margin_start(6)
+        vbox.set_margin_end(6)
+        vbox.set_hexpand(True)
+        vbox.set_vexpand(True)
+        scroll.set_child(vbox)
+
+        # Severity indicator
+        sev_lbl = Gtk.Label(label=f"Severity: {severity}")
+        sev_lbl.set_wrap(False)
+        sev_lbl.set_xalign(0)
+        sev_lbl.set_hexpand(True)
+        sev_lbl.set_vexpand(False)
+        sev_lbl.set_margin_bottom(2)
+        sev_lbl.set_markup(f"<b><span foreground=\"{sev_color}\">Severity: {severity}</span></b>")
+        vbox.append(sev_lbl)
+
+        # Issue summary
+        issue_map = {
+            "crash": "App won't start",
+            "files": "Can't access files",
+            "network": "Can't access network",
+            "devices": "Can't access microphone/camera",
+            "performance": "Performance issues",
+            "unknown": "Unknown issue",
+        }
+        summary = Gtk.Label(label=f"Issue: {issue_map.get(issue_type, issue_type)}")
+        summary.set_wrap(True)
+        summary.set_xalign(0)
+        summary.set_hexpand(True)
+        summary.set_vexpand(False)
+        vbox.append(summary)
+
+        # User-friendly diagnostic summary
+        diag_summary = Gtk.Label(label="\n".join(summary_lines))
+        diag_summary.set_wrap(True)
+        diag_summary.set_xalign(0)
+        diag_summary.set_hexpand(True)
+        diag_summary.set_vexpand(False)
+        diag_summary.set_margin_bottom(6)
+        vbox.append(diag_summary)
+
+        # Recommendation
+        rec_lbl = Gtk.Label(label=recommendation["title"])
+        rec_lbl.get_style_context().add_class("title-2")
+        rec_lbl.set_wrap(True)
+        rec_lbl.set_xalign(0)
+        rec_lbl.set_hexpand(True)
+        rec_lbl.set_vexpand(False)
+        vbox.append(rec_lbl)
+
+        # Why this solution
+        why = Gtk.Label(label=recommendation["why"])
+        why.set_wrap(True)
+        why.set_xalign(0)
+        why.set_hexpand(True)
+        why.set_vexpand(True)
+        vbox.append(why)
+
+
+        # Apply button
+        btn_apply = Gtk.Button(label=f"Apply: {recommendation['title']}")
+        btn_apply.get_style_context().add_class("suggested-action")
+        btn_apply.connect("clicked", lambda w: (recommendation["action"](snap_name), dialog.destroy()))
+        vbox.append(btn_apply)
 
         btn_close = Gtk.Button(label="Close")
         btn_close.connect("clicked", lambda b: dialog.destroy())
         vbox.append(btn_close)
         dialog.show()
+
+    def _check_classic_support(self, snap_name: str) -> bool:
+        code, out, _ = self.run_command(f"snap info {shlex.quote(snap_name)}")
+        return "classic" in out.lower() if code == 0 else False
+
+    def _check_snap_plugs(self, snap_name: str) -> bool:
+        code, out, _ = self.run_command(f"snap connections {shlex.quote(snap_name)}")
+        return "plug" in out.lower() if code == 0 else False
+
+    def _check_apt_package(self, snap_name: str) -> bool:
+        code, out, _ = self.run_command(f"apt-cache search {shlex.quote(snap_name)}")
+        return snap_name.lower() in out.lower() if code == 0 else False
+
+    def _recommend_solution(self, snap_name: str, issue_type: str, diagnostics: dict) -> dict:
+        # Auto-recommend based on issue type and diagnostics
+        
+        if issue_type == "crash":
+            if diagnostics["supports_classic"]:
+                return {
+                    "title": "Try Classic Confinement",
+                    "why": "Classic mode removes sandbox restrictions that might cause crashes.",
+                    "action": lambda n: self.run_long_command(
+                        f"Install {n} with classic confinement",
+                        f"snap install --classic {shlex.quote(n)}"
+                    ),
+                }
+            else:
+                return {
+                    "title": "Try Developer Mode (Devmode)",
+                    "why": "Devmode removes all sandbox restrictions. Good for testing.",
+                    "action": lambda n: self._confirm_devmode_install(n),
+                }
+        
+        elif issue_type == "files":
+            if diagnostics["has_plugs"]:
+                return {
+                    "title": "Connect File Access Permissions",
+                    "why": "The snap needs permission to access files. We'll show available plugs.",
+                    "action": lambda n: self.run_long_command(
+                        f"Show available connections for {n}",
+                        f"snap connections {shlex.quote(n)}"
+                    ),
+                }
+            else:
+                return {
+                    "title": "Switch to APT Version",
+                    "why": "No file plugs available. Using APT version avoids sandbox entirely.",
+                    "action": lambda n: self.run_long_command(
+                        f"Install {n} from APT",
+                        f"apt install {shlex.quote(n)}"
+                    ),
+                }
+        
+        elif issue_type == "network":
+            return {
+                "title": "Connect Network Permission",
+                "why": "The snap needs network access plug. Let's check available connections.",
+                "action": lambda n: self.run_long_command(
+                    f"Show network-related connections for {n}",
+                    f"snap connections {shlex.quote(n)} | grep -i network || snap connections {shlex.quote(n)}"
+                ),
+            }
+        
+        elif issue_type == "devices":
+            return {
+                "title": "Connect Camera/Microphone Permission",
+                "why": "The snap needs hardware device access. Let's check available plugs.",
+                "action": lambda n: self.run_long_command(
+                    f"Show device connections for {n}",
+                    f"snap connections {shlex.quote(n)} | grep -i -E 'camera|audio|microphone' || snap connections {shlex.quote(n)}"
+                ),
+            }
+        
+        elif issue_type == "performance":
+            if diagnostics["apt_available"]:
+                return {
+                    "title": "Switch to APT (Faster Alternative)",
+                    "why": "APT packages typically have less overhead than snaps.",
+                    "action": lambda n: self.run_long_command(
+                        f"Install {n} from APT",
+                        f"apt install {shlex.quote(n)}"
+                    ),
+                }
+            else:
+                return {
+                    "title": "Try Developer Mode",
+                    "why": "Devmode removes confinement overhead that may be slowing the app.",
+                    "action": lambda n: self._confirm_devmode_install(n),
+                }
+        
+        else:  # unknown
+            return {
+                "title": "Check Snap Connections & Info",
+                "why": "Let's check the snap's configuration and available permissions.",
+                "action": lambda n: self.run_long_command(
+                    f"Show detailed info and connections for {n}",
+                    f"snap info {shlex.quote(n)} && echo '\n--- Connections ---' && snap connections {shlex.quote(n)}"
+                ),
+            }
+
+    def _confirm_devmode_install(self, snap_name: str):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Install {snap_name} in devmode?\n\nThis removes all sandbox restrictions. Proceed only if you trust this snap.",
+        )
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Install Devmode", Gtk.ResponseType.OK)
+        resp = self._run_dialog_blocking(dlg)
+        if resp == Gtk.ResponseType.OK:
+            cmd = f"snap remove {shlex.quote(snap_name)} && snap install --devmode {shlex.quote(snap_name)}"
+            self.run_long_command(f"Reinstall {snap_name} in devmode", cmd)
 
     def populate_apt(self):
         self.clear_listbox(self.apt_list)
@@ -413,25 +618,64 @@ class SnapManagerApp(Gtk.Application):
 
             hbox.append(row_box)
 
-            btn_hold_snap = Gtk.Button(label="Hold updates")
-            btn_hold_snap.connect(
-                "clicked",
-                lambda w, n=pkg: self.confirm_and_run_snap_hold(
-                    n, hold=True, duration=None
-                ),
-            )
-            hbox.append(btn_hold_snap)
+            # Show details button
+            btn_details = Gtk.Button(label="Show details")
+            btn_details.connect("clicked", lambda w, n=pkg: self.show_apt_details(n))
+            hbox.append(btn_details)
 
-            btn_hold_snap_24 = Gtk.Button(label="Hold 24h")
-            btn_hold_snap_24.connect(
-                "clicked",
-                lambda w, n=pkg: self.confirm_and_run_snap_hold(
-                    n, hold=True, duration="24h"
-                ),
-            )
-            hbox.append(btn_hold_snap_24)
+            # Remove package button
+            btn_remove = Gtk.Button(label="Remove")
+            btn_remove.connect("clicked", lambda w, n=pkg: self.confirm_and_remove_apt(n))
+            hbox.append(btn_remove)
+
+            # Reinstall package button
+            btn_reinstall = Gtk.Button(label="Reinstall")
+            btn_reinstall.connect("clicked", lambda w, n=pkg: self.confirm_and_reinstall_apt(n))
+            hbox.append(btn_reinstall)
 
             self.apt_list.append(hbox)
+    def show_apt_details(self, pkg):
+        code, out, err = self.run_command(f"apt show {shlex.quote(pkg)}")
+        txt = out.strip() or err.strip() or f"return code {code}"
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=f"APT package details for {pkg}:",
+        )
+        dlg.format_secondary_text(txt)
+        self._run_dialog_blocking(dlg)
+
+    def confirm_and_remove_apt(self, pkg):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Remove {pkg}?\n\nThis will run 'sudo apt remove {pkg}'. Proceed?",
+        )
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Remove", Gtk.ResponseType.OK)
+        resp = self._run_dialog_blocking(dlg)
+        if resp == Gtk.ResponseType.OK:
+            cmd = f"sudo apt remove {shlex.quote(pkg)}"
+            self.run_long_command(f"Remove {pkg}", cmd)
+
+    def confirm_and_reinstall_apt(self, pkg):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Reinstall {pkg}?\n\nThis will run 'sudo apt install --reinstall {pkg}'. Proceed?",
+        )
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Reinstall", Gtk.ResponseType.OK)
+        resp = self._run_dialog_blocking(dlg)
+        if resp == Gtk.ResponseType.OK:
+            cmd = f"sudo apt install --reinstall {shlex.quote(pkg)}"
+            self.run_long_command(f"Reinstall {pkg}", cmd)
 
     def set_snap_filter(self, text: str):
         self.snap_filter = text or ""
@@ -541,8 +785,13 @@ class SnapManagerApp(Gtk.Application):
         self._run_dialog_blocking(dlg)
 
     def _icon_for_snap(self, name: str) -> Gtk.Image:
-        # 1) Snap desktop file (store-provided icon)
-        desk = self._find_desktop_file(name, ["/var/lib/snapd/desktop/applications"])
+        # 1) Try to find a desktop file in common Ubuntu locations
+        desktop_paths = [
+            os.path.expanduser("~/.local/share/applications"),
+            "/usr/share/applications",
+            "/var/lib/snapd/desktop/applications",
+        ]
+        desk = self._find_desktop_file(name, desktop_paths)
         if desk:
             img = self._image_from_desktop(desk)
             if img:
@@ -571,9 +820,13 @@ class SnapManagerApp(Gtk.Application):
         return Gtk.Image.new_from_icon_name("application-x-executable")
 
     def _icon_for_package(self, name: str) -> Gtk.Image:
-        desk = self._find_desktop_file(
-            name, ["/usr/share/applications", "/var/lib/snapd/desktop/applications"]
-        )
+        # Try to find a desktop file in more locations for apt packages
+        desktop_paths = [
+            os.path.expanduser("~/.local/share/applications"),
+            "/usr/share/applications",
+            "/var/lib/snapd/desktop/applications",
+        ]
+        desk = self._find_desktop_file(name, desktop_paths)
         if desk:
             img = self._image_from_desktop(desk)
             if img:
@@ -600,55 +853,8 @@ class SnapManagerApp(Gtk.Application):
             background: #242424;
             color: #e6e6e6;
         }
-        scrolledwindow {
-            background: #1e1e1e;
-            border: 1px solid #2c2c2c;
-        }
-        listbox row {
-            background: #1e1e1e;
-            color: #e6e6e6;
-            padding: 6px;
-        }
-        listbox row:selected {
-            background: #c75000;
-            color: #ffffff;
-        }
-        button {
-            background: #2f2f2f;
-            color: #f4f4f4;
-            border-radius: 6px;
-            padding: 4px 12px;
-            border: 1px solid #3a3a3a;
-        }
-        button:hover {
-            background: #3a3a3a;
-        }
-        button:active {
-            background: #c75000;
-            color: #ffffff;
-            border-color: #c75000;
-        }
-        label {
-            color: #e6e6e6;
-        }
-        entry {
-            background: #2a2a2a;
-            color: #e6e6e6;
-            border: 1px solid #3a3a3a;
-            border-radius: 4px;
-            padding: 6px;
-        }
-        separator {
-            background: #2c2c2c;
-        }
         """
-        provider = Gtk.CssProvider()
-        provider.load_from_data(css)
-        display = Gdk.Display.get_default()
-        if display:
-            Gtk.StyleContext.add_provider_for_display(
-                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
+        # ...existing code for applying CSS...
 
     def _set_dialog_secondary(self, dialog: Gtk.MessageDialog, text: str):
         # Deprecated helper kept for compatibility; not used after inlined text approach.
