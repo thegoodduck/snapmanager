@@ -7,6 +7,7 @@ import threading
 import subprocess
 import shlex
 import os
+import json
 
 
 class SnapManagerApp(Gtk.Application):
@@ -32,6 +33,7 @@ class SnapManagerApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.example.SnapManager")
         self.connect("activate", self.on_activate)
+        self.snap_apt_db = self._load_snap_apt_db()
 
     def on_activate(self, app):
         self.window = Gtk.ApplicationWindow(application=app)
@@ -342,24 +344,21 @@ class SnapManagerApp(Gtk.Application):
     def _run_diagnostics(self, snap_name: str, issue_type: str, prev_dialog):
         prev_dialog.destroy()
 
-        # Run and parse diagnostics for user-friendly summary
-        info_code, info_out, info_err = self.run_command(f"snap info {shlex.quote(snap_name)}")
-        connections_code, connections_out, connections_err = self.run_command(f"snap connections {shlex.quote(snap_name)}")
-        apt_code, apt_out, apt_err = self.run_command(f"apt-cache search {shlex.quote(snap_name)}")
+        supports_classic, info_code, info_out, info_err = self._check_classic_support(snap_name)
+        has_any_plug, connections_code, connections_out, connections_err = self._check_snap_plugs(snap_name)
+        apt_available, apt_candidates, apt_note = self._check_apt_package(snap_name)
 
-        # Parse classic support
-        supports_classic = ("classic" in info_out.lower()) if info_code == 0 else False
-        # Parse plugs
-        has_file_plug = "home" in connections_out or "removable-media" in connections_out
-        has_network_plug = "network" in connections_out or "network-bind" in connections_out
-        has_audio_plug = any(x in connections_out for x in ["audio-record", "camera", "microphone"])
-        # Parse apt availability
-        apt_available = snap_name.lower() in apt_out.lower() if apt_code == 0 else False
+        lower_connections = connections_out.lower() if connections_code == 0 else ""
+        has_file_plug = any(token in lower_connections for token in ["home", "removable-media"])
+        has_network_plug = any(token in lower_connections for token in ["network", "network-bind"])
+        has_audio_plug = any(token in lower_connections for token in ["audio-record", "camera", "microphone"])
 
         diagnostics = {
             "supports_classic": supports_classic,
-            "has_plugs": has_file_plug or has_network_plug or has_audio_plug,
+            "has_plugs": has_any_plug,
             "apt_available": apt_available,
+            "apt_candidates": apt_candidates,
+            "apt_note": apt_note,
         }
 
         # Build user-friendly summary
@@ -386,11 +385,15 @@ class SnapManagerApp(Gtk.Application):
                 summary_lines.append("Snap has audio/camera plugs.")
             else:
                 summary_lines.append("Snap does NOT have audio/camera plugs.")
-        if apt_code != 0:
-            summary_lines.append("Could not check for APT package.")
+        if apt_available:
+            summary_lines.append(f"APT alternative found: {', '.join(apt_candidates)}.")
         else:
-            if apt_available:
-                summary_lines.append("An APT package with this name is available.")
+            if apt_note:
+                summary_lines.append(apt_note)
+            elif apt_candidates:
+                summary_lines.append(
+                    f"Tried apt names {', '.join(apt_candidates)}, but they are not available in current repos."
+                )
             else:
                 summary_lines.append("No APT package with this name found.")
 
@@ -495,17 +498,32 @@ class SnapManagerApp(Gtk.Application):
         vbox.append(btn_close)
         dialog.show()
 
-    def _check_classic_support(self, snap_name: str) -> bool:
-        code, out, _ = self.run_command(f"snap info {shlex.quote(snap_name)}")
-        return "classic" in out.lower() if code == 0 else False
+    def _check_classic_support(self, snap_name: str):
+        code, out, err = self.run_command(f"snap info {shlex.quote(snap_name)}")
+        supports = "classic" in out.lower() if code == 0 else False
+        return supports, code, out, err
 
-    def _check_snap_plugs(self, snap_name: str) -> bool:
-        code, out, _ = self.run_command(f"snap connections {shlex.quote(snap_name)}")
-        return "plug" in out.lower() if code == 0 else False
+    def _check_snap_plugs(self, snap_name: str):
+        code, out, err = self.run_command(f"snap connections {shlex.quote(snap_name)}")
+        has_any = "plug" in out.lower() if code == 0 else False
+        return has_any, code, out, err
 
-    def _check_apt_package(self, snap_name: str) -> bool:
-        code, out, _ = self.run_command(f"apt-cache search {shlex.quote(snap_name)}")
-        return snap_name.lower() in out.lower() if code == 0 else False
+    def _check_apt_package(self, snap_name: str):
+        candidates, note = self._apt_candidates_for_snap(snap_name)
+        if snap_name.lower() in self.snap_apt_db and not candidates:
+            return False, [], note or "This snap is only distributed through the Snap Store."
+
+        search_targets = candidates or [snap_name]
+        found = []
+        for candidate in search_targets:
+            code, out, _ = self.run_command(f"apt-cache search {shlex.quote(candidate)}")
+            if code == 0 and candidate.lower() in out.lower():
+                found.append(candidate)
+
+        if found:
+            return True, found, note
+
+        return False, search_targets if candidates else [], note
 
     def _recommend_solution(self, snap_name: str, issue_type: str, diagnostics: dict) -> dict:
         # Auto-recommend based on issue type and diagnostics
@@ -680,7 +698,7 @@ class SnapManagerApp(Gtk.Application):
             buttons=Gtk.ButtonsType.OK,
             text=f"APT package details for {pkg}:",
         )
-        dlg.format_secondary_text(txt)
+        dlg.set_property("secondary-text", txt)
         self._run_dialog_blocking(dlg)
 
     def confirm_and_remove_apt(self, pkg):
@@ -764,9 +782,30 @@ class SnapManagerApp(Gtk.Application):
             self.run_long_command(f"Reinstall --devmode {snap_name}", cmd)
 
     def suggest_switch_to_apt(self, snap_name):
-        # Show a dialog suggesting apt install command
-        pkg = snap_name  # naive mapping
+        apt_available, apt_candidates, apt_note = self._check_apt_package(snap_name)
+        if not apt_available:
+            detail = apt_note or (
+                "No apt alternative was found. This snap may only be available from the Snap Store."
+            )
+            if apt_candidates:
+                detail = (
+                    f"Tried apt names {', '.join(apt_candidates)}, but they were not found in your enabled repositories. "
+                    f"{apt_note or 'Consider enabling additional repositories or PPAs if applicable.'}"
+                )
+            dlg = Gtk.MessageDialog(
+                transient_for=self.window,
+                modal=True,
+                message_type=Gtk.MessageType.INFO,
+                buttons=Gtk.ButtonsType.OK,
+                text=f"No apt build available for {snap_name}.",
+            )
+            dlg.set_property("secondary-text", detail)
+            self._run_dialog_blocking(dlg)
+            return
+
+        pkg = apt_candidates[0] if apt_candidates else snap_name
         cmd = f"sudo apt install {pkg}"
+        extra_note = f"\n\n{apt_note}" if apt_note else ""
         dlg = Gtk.MessageDialog(
             transient_for=self.window,
             modal=True,
@@ -774,8 +813,7 @@ class SnapManagerApp(Gtk.Application):
             buttons=Gtk.ButtonsType.OK_CANCEL,
             text=(
                 f"Switch {snap_name} to apt?\n\n"
-                f"If an apt package exists for this app, running `{cmd}` will install the apt version. "
-                f"You may then remove the snap with `sudo snap remove {snap_name}`."
+                f"This will run `{cmd}`. You may then remove the snap with `sudo snap remove {snap_name}`." + extra_note
             ),
         )
         resp = self._run_dialog_blocking(dlg)
@@ -910,6 +948,46 @@ class SnapManagerApp(Gtk.Application):
             next_child = child.get_next_sibling()
             listbox.remove(child)
             child = next_child
+
+    def _load_snap_apt_db(self):
+        default_db = {
+            "firefox": {
+                "apt": ["firefox"],
+                "notes": "Firefox is available as a deb via Mozilla's PPA.",
+            },
+            "vlc": {"apt": ["vlc"], "notes": "Install vlc from apt for classic desktop integration."},
+            "gimp": {"apt": ["gimp"]},
+            "chromium": {
+                "apt": [],
+                "notes": "Chromium debs are transitional; Ubuntu ships the snap version only.",
+            },
+            "multipass": {
+                "apt": [],
+                "notes": "Multipass is distributed only as a snap by Canonical.",
+            },
+        }
+        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        data_path = os.path.join(data_dir, "snap_to_apt.json")
+        if os.path.exists(data_path):
+            try:
+                with open(data_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                normalized = {}
+                for key, val in data.items():
+                    normalized[key.lower()] = {
+                        "apt": val.get("apt") or [],
+                        "notes": val.get("notes", ""),
+                    }
+                return normalized
+            except Exception:
+                pass
+        return {k.lower(): v for k, v in default_db.items()}
+
+    def _apt_candidates_for_snap(self, snap_name: str):
+        entry = self.snap_apt_db.get(snap_name.lower())
+        if not entry:
+            return [], ""
+        return entry.get("apt", []), entry.get("notes", "")
 
     def _apply_css(self):
         css = b"""

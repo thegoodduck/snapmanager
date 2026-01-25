@@ -1,0 +1,26 @@
+{
+  "firefox": {
+    "apt": ["firefox"],
+    "notes": "Firefox debs are available from the Mozilla PPA if you prefer apt over the default snap."
+  },
+  "vlc": {
+    "apt": ["vlc"],
+    "notes": "VLC from apt integrates with classic desktop extensions out of the box."
+  },
+  "gimp": {
+    "apt": ["gimp"],
+    "notes": "Install gimp from apt when you need plugin compatibility or scripts."
+  },
+  "chromium": {
+    "apt": [],
+    "notes": "Chromium is currently distributed as a snap on Ubuntu; the deb is only a stub."
+  },
+  "multipass": {
+    "apt": [],
+    "notes": "Multipass is officially distributed only as a snap by Canonical. Use `snap install multipass`."
+  },
+  "libreoffice": {
+    "apt": ["libreoffice"],
+    "notes": "Use the apt meta-package for the classic LibreOffice desktop experience."
+  }
+}
